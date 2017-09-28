@@ -22,7 +22,7 @@ fig_caption: yes
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-setwd("~/CSIROAssignment")
+
 #these are some packages I use
 library(ggplot2) #better graphics
 library(reshape2) #data manipulation
