@@ -1,0 +1,273 @@
+---
+title: "Data61 Job Application Assignment"
+author: "Eve Slavich"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    pdf_document:
+self_contained: true
+toc: true
+header-includes:
+    - \usepackage{amsmath,amssymb,amsthm,amscd}
+    - \usepackage{graphicx}
+    - \usepackage{subfig}
+    - \usepackage{parskip}
+    - \usepackage{float}
+    - \usepackage{multirow}
+    - \usepackage{tabularx}
+    - \usepackage{bbm}
+geometry: margin=4cm
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+setwd("~/CSIROAssignment")
+#these are some packages I use
+library(ggplot2) #better graphics
+library(reshape2) #data manipulation
+library(dplyr) #better data manipulation 
+library(caret) #cross validation functions
+library(rpart) #decision tree
+library(glmnet) #lasso package
+library(randomForest) #random forest package
+source("Functions.R") #Functions I wrote to do this assignment
+
+#Read in the data files
+red = read.csv("winequality-red.csv", header=T, sep=";")
+white = read.csv("winequality-white.csv", header=T, sep=";")
+
+
+#this changes the dataframe into long format, convenient for plotting
+red_long = melt(red)
+white_long = melt(white)
+all_long = rbind(red_long, white_long)
+all_long$wine_colour = c(rep("red",nrow(red_long)),rep("white",nrow(white_long)))
+
+```
+# Introduction
+
+This is an assignment performed as part of an application for the position of Data Scientist at CSIRO. I have written up my answers using Rmarkdown, which folds the code and outputs into a pdf report. By reading the .Rmd file you can view the backend code. 
+
+# Part One: Visualise The Data
+
+Let's take a look at the response variable, wine quality. Figure \ref{fig:hist} shows that wine quality varies from 3 to 9, with the bulk of observations (Interquartile range) being 5 or 6. It looks normally distributed -ish. 
+
+
+```{r hist, echo=FALSE,fig.cap="\\label{fig:hist} Histograms of the distribution of wine quality."}
+par(mfrow=c(1,2)) #make the graphics window plot twp plots side by side
+hist( red$quality) #plot a histogram
+hist( white$quality) #plot a histogram
+```
+
+
+
+Let's plot the predictor variables (Figure \ref{fig:figs}). The red and white wines have distinct characteristics- for example red wines have higher volatile acidity, while white wines have higher residual sugar. These distinct characteristics combined with the fact that reds and whites have a similar quality distribution suggests that reds and whites are scored differently and should be modelled separately. Many of the variables have some right skew to them (e.g. chlorides and residual sugar) which suggests log transforming the variables may yield better predictors. 
+
+
+
+```{r plotvars, echo=FALSE, fig.cap="\\label{fig:figs}Boxplots of predictor variables. White and Red wines are plotted as side by side boxplots- they often inhabit separate `zones' of the predictor variables. "}
+
+ ggplot(subset(all_long, variable!="quality"), aes(y = value, x=1, colour=wine_colour)) + geom_boxplot() + facet_wrap(~variable, scales="free") + theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(), strip.text.x = element_text(size=10))
+ 
+```
+
+Now lets look at trends between the variables. A pair plot shows that there are some trends. E.g. Density and  fixed acidity are quite correlated, and citric acid and fixed acidity are quite correlated. 
+
+```{r pairs, echo=FALSE,fig.cap="\\label{fig:pairs} Pairs plot of predictors. There are some correlated variables, though the greatest correlation is only 0.67 which is unlikely to cause collinearity problems."}
+pairs(red[,1:11])
+pairs(white[,1:11])
+
+```
+
+
+
+Now let's look for trends between wine quality and the predictor variables (Figures  \ref{fig:figstrend1},\ref{fig:figstrend2}). There are some trends visible (e.g. wine quality increases with alcohol, and decreases with volatile acidity), although none are paricularly strong. Often the smoother is being swayed heavily by a couple of influential points. Cross validation should help me select the method that is less swayed by these points (I chose not to delete any outliers). 
+
+
+
+
+```{r plottrend, echo=FALSE, message=FALSE, include=FALSE}
+#this is just reformatting the data for the plotting function
+red_long2 = melt(red, id.vars=c("quality"))
+white_long2 = melt(white, id.vars=c("quality"))
+
+#plot the wine quality against the predictor variables, with jittering and display a smoother
+Trend_plot_red = ggplot(red_long2, aes(value, quality))+geom_jitter(width=0, height=0.25)+geom_smooth()+facet_wrap(~variable, scales="free")+ggtitle("Red wine trends")
+
+Trend_plot_white = ggplot(white_long2, aes(value, quality))+geom_jitter(width=0, height=0.25)+geom_smooth()+facet_wrap(~variable, scales="free")+ggtitle("White wine trends")
+
+```
+```{r plottrend1, echo=FALSE, message=FALSE,fig.cap="\\label{fig:figstrend1}Trends in red wine quality against the predictor variables. Here ``jittering'' has been used to display the trends better (a small amount of deviation is added to the quality score to make the score less discrete). The smoother (using generalised additive modelling) displays the trend in the true (unjittered) data."}
+print(Trend_plot_red)
+
+```
+
+
+```{r plottrend2, echo=FALSE, message=FALSE,fig.cap="\\label{fig:figstrend2}Trends in white wine quality against the predictor variables. Here ``jittering'' has been used to display the trends better (a small amount of deviation is added to the quality score to make the score less discrete). The smoother (using generalised additive modelling) displays the trend in the true (unjittered) data."}
+print(Trend_plot_white)
+
+```
+
+
+```{r formatdat,warning=FALSE, message=FALSE, echo=TRUE, include=FALSE}
+#this is some data formatting for the lasso:
+
+# adding logs of variables
+red = add_logs(red)
+white = add_logs(white)
+
+#and adding interaction variables for the lasso fit
+red_matrix =  apply(as.matrix(red[,-c(4:6,12)]),2,as.numeric)
+colnames(red_matrix) = names(red)[-c(4:6,12)]
+X_red = add_interaction_terms(red_matrix)
+
+white_matrix =  apply(as.matrix(white[,-c(4:6,12)]),2,as.numeric)
+colnames(white_matrix) = names(white)[-c(4:6,12)]
+X_white = add_interaction_terms(white_matrix)
+
+# adding the response variable back in
+red1 = cbind(X_red, red[,c("quality")])
+colnames(red1)[ncol(red1)]=c("quality")
+
+white1 = cbind(X_white, white$quality)
+colnames(white1)[ncol(white1)]="quality"
+
+#test run
+#red_1 = red1[sample(1:nrow(red1), 60, F),]
+#white_1=white1[sample(1:nrow(white1), 60, F),]
+
+red_1 = red1
+white_1=white1
+```
+ 
+
+#Part Two: Predict Wine Quality Scores. 
+
+As the trends in wine quality don't seem to be strong with the predictors, methods like decision trees/ random forest are likely to better encapsulate the complex interactions between the predictors that determine quality. 
+
+  
+I decided to try three approaches. 
+
+1) Fitting a lasso regression (using glmnet for R). I added all pairwise interactions and logs of some variables to the input variables. Lasso works by minimising the penalised negative log likelihood. A penalty term $\lambda$ needs to be selected. I used cross validation and a grid search to select $\lambda$. Rather than select the $\lambda$ that minimises the mean squared error ($\lambda_{min}$), I selected the maximum value within one standard error of ($\lambda_{min}$). This imposes are higher penalty on complexity. 
+
+2) A random forest (using randomForest for R). I did not include the pairwise interactions here as the forest can discover those itself. This implementation uses Breiman's algorithm. Briefly, the data are repeatedly split into test and training. 
+
+3) A lasso regression additionally using as variables the rules generated from an ensemble of decision trees. The last method is similar to RuleFit (Friedman and Popescue 2005, http://statweb.stanford.edu/~jhf/ftp/RuleFit.pdf). The idea of RuleFit is to fit decision trees to generate a large number of new potential features, but then select features and fit coefficients via lasso regression. 
+
+To compared the approaches I used K - fold cross validation with K = 3, repeated 3 times, and then averaging the resulting performance metrics. These numbers are a bit on the low side, but give a rough indication of predictive accuracy. I used the root mean squared error and mean absolute deviation as performance metrics. I evaluated the performance metrics on both the raw model predictions and the rounded model prediction (e.g. the model may predict a value of 5.3, and we round this to a score of 5). I assumed if a wine expert wanted to give a score of 5.5 they would round it to 6 and so forth. 
+
+
+
+
+```{r newfeatures,warning=FALSE, message=FALSE, echo=FALSE}
+
+K = 3
+N = 3
+start_time = proc.time()
+#Here I  evaluate the lasso with K fold CV, using the 11 predictor variables
+#plus all pairwise interactions
+
+#cv.error is a function that repeatedly evaluates 'fit_and_predict' on test/training
+#splits. I have written different fit and predict functions for different models.
+#These can be viewed at the end, or in the file Functions.R
+
+evaluate_naive_lasso_red  = cv.error (red_1 , x_vars= c(1:(ncol(red_1)-1)),
+                                      y_var = ncol(red_1), K = K , N = N, 
+                                      fit_and_predict = lasso_fit_and_predict )
+
+
+
+evaluate_naive_lasso_white  = cv.error (white_1 , x_vars= c(1:(ncol(white_1)-1)),
+                                        y_var = ncol(white_1), K = K , N = N,
+                                        fit_and_predict = lasso_fit_and_predict )
+
+
+
+```
+
+```{r newfeatures4,warning=FALSE, message=FALSE, echo=FALSE}
+#Here I fit and evaluate the random forest using the 11 predictor variables
+evaluate_random_forest_red  = cv.error (red_1 , x_vars= c(1:11),
+                                        y_var = ncol(red_1), K = K , N = N, 
+                                        fit_and_predict = random_Forest )
+
+
+evaluate_random_forest_white  = cv.error (white_1 , x_vars=c(1:11),
+                                          y_var = ncol(white_1), K = K , N = N, 
+                                          fit_and_predict = random_Forest )
+```
+
+
+```{r new,warning=FALSE, message=FALSE, echo=FALSE}
+# Here I evaluate the decision tree+ lasso method
+evaluate_rule_fit_red  = cv.error (red_1 , x_vars=NA, 
+                                   y_var = ncol(red_1), K = K , N = N, 
+                                   fit_and_predict = RuleFit )
+
+
+evaluate_rule_fit_white  = cv.error (white_1 , x_vars=NA, 
+                                     y_var = ncol(white_1), K = K , N = N, 
+                                     fit_and_predict = RuleFit )
+
+
+```
+```{r newfeatures5,warning=FALSE, message=FALSE, echo=FALSE}
+#this chunk of code creates tables of performance metics
+evaluation_metrics_red = cbind(evaluate_rule_fit_red,evaluate_naive_lasso_red,evaluate_random_forest_red) 
+rownames(evaluation_metrics_red) = c("RMSE","MAE", "RMSE (rounded predictions)",  "MAE (rounded predictions")
+colnames(evaluation_metrics_red) = c("Rule Fit", "Naive Lasso",  "RandomForest")
+
+evaluation_metrics_white = cbind(evaluate_rule_fit_white,evaluate_naive_lasso_white,evaluate_random_forest_white) 
+rownames(evaluation_metrics_white ) = c("RMSE","MAE", "RMSE (rounded predictions)",  "MAE (rounded predictions")
+colnames(evaluation_metrics_white) = c("Rule Fit", "Naive Lasso",  "RandomForest")
+
+
+```
+
+Now lets have a look at the results, which I have combined into the tables evaluation_metrics_red and evaluation_metrics_white. 
+```{r performance,warning=FALSE, message=FALSE, echo=TRUE}
+end_time = proc.time()
+end_time- start_time
+evaluation_metrics_red
+evaluation_metrics_white
+
+```
+
+The table shows that random forest is performing best- on test data it has the lowest mean absolute error and root mean squared error. Whether or not we round the score, to make it a kind of classification of wine quality, does not seem to affect things. 
+
+
+#Part 3: Variable Importance
+
+Lets fit the random forest again and look at variable importance. For a particular variable $x$, we take  the average percentage increase in mean squared error (on the test data/ out of bag data,  over all trees) when $x$ is randomly permuted. A high increase means the variable is more important.  Figure \ref{fig:figsVarImp} show the relative importance of the predictors. Alcohol and volatile acidity are among most important predictors for both red and white wine.  Sulfates are important for red wines while free sulphur dioxide is amongst the most important predictors for white wine. 
+
+```{r final_model,warning=FALSE, message=FALSE, echo=TRUE}
+fit_red = randomForest(x=red_1[,1:11], y=red_1[,"quality"], importance=TRUE)
+fit_white = randomForest(x=white_1[,1:11], y=white_1[,"quality"], importance=TRUE)
+
+```
+
+```{r plotVarImp, echo=TRUE, message=FALSE,fig.cap="\\label{fig:figsVarImp} This plot shows the importance of the predictors for red and white wines: alcohol, sulphates and volatile acidity are the most important predictors for red wine whilst volatile acidity, free sulphur dioxide and alcohol are the most important predictors for white wine."}
+par(mfrow=c(1,2))
+varImpPlot(fit_red,type=1 )
+varImpPlot(fit_white,type=1 )
+
+```
+
+#Wrap - Up
+
+I fitted three different types of model. Based on what I read, I thought RuleFit, the combination of decision trees and lasso, was going to perform best. However, my implementation of it did not improve on a naive lasso implementation. Perhaps it is prone to overfitting, or perhaps I need to spend more computational effort on determining the optimal lasso penalty and the decision rules. I chose the lasso penalty with 5 - fold cross validation (20 would be better). I could have generated more decision rules by ``growing'' more decision trees (with more random splits of the data). Some things I thought of that could also be tried to improve the fit of the lasso include adding quadratic and cubic terms in the predictors. 
+
+One thing I did not consider, was the correlation between variables in the variable importance calculations. It's notable that the method I used selected several of the least collinear variables (according to the pairs plot). Perhaps clusters of correlated variables are important. 
+
+#Code Appendices
+
+The code can be examined in the file Functions.R. However I have also appended the more important functions here 
+
+```{r Functions, echo=TRUE, message=FALSE}
+RuleFit
+random_Forest
+lasso_fit_and_predict 
+Create_features_from_decision_forest 
+cv.error
+```
